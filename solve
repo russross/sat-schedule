@@ -3,7 +3,7 @@
 from pysat.formula import CNF
 from pysat.solvers import Solver
 import sys
-from cset import course_data
+from computing import course_data
 
 all_rooms = sorted({
     triple[0]: True
