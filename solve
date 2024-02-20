@@ -1,0 +1,251 @@
+#!/usr/bin/python3
+
+from pysat.formula import CNF
+from pysat.solvers import Solver
+import sys
+from cset import course_data
+
+all_rooms = sorted({
+    triple[0]: True
+        for elt in course_data.values()
+        for triple in elt['room_times']
+    }.keys())
+rooms_by_course = {
+    course: sorted({
+        triple[0]: True
+            for triple in value['room_times']
+    }.keys())
+        for (course, value) in course_data.items()
+}
+
+days = 'MTWRFSU'
+def time_key(t):
+    day = days.index(t[0])
+    for (i, ch) in enumerate(t):
+        if ch.isdigit():
+            time = t[i:i+4]
+            dur = int(t[i+5:])
+            break
+    return (day, time, dur)
+
+all_times = sorted({
+    triple[1]: True
+        for elt in course_data.values()
+        for triple in elt['room_times']
+    }.keys(), key=time_key)
+times_by_course = {
+    course: sorted({
+        triple[1]: True
+            for triple in value['room_times']
+    }.keys(), key=time_key)
+        for (course, value) in course_data.items()
+}
+
+courses = sorted(course_data.keys())
+
+def parse_time(t):
+    for (i, ch) in enumerate(t):
+        if ch.isdigit():
+            days = t[:i]
+            start = int(t[i:i+2])*60 + int(t[i+2:i+4])
+            end = start + int(t[i+5:])
+            return (days, start, end)
+    print(f'failed to parse {t}')
+    sys.exit(1)
+
+time_conflicts = {}
+for time_a in all_times:
+    days_a, start_a, end_a = parse_time(time_a)
+    for time_b in all_times:
+        if time_a == time_b: continue
+        days_b, start_b, end_b = parse_time(time_b)
+        if end_a <= start_b or start_a >= end_b: continue
+        for day in days_a:
+            if day in days_b:
+                if time_a not in time_conflicts: time_conflicts[time_a] = []
+                time_conflicts[time_a].append(time_b)
+                break
+
+course_room_to_var = {}
+var_to_course_room = {}
+course_time_to_var = {}
+var_to_course_time = {}
+var_count = 1
+clauses = []
+
+def assign_vars():
+    global var_count
+    for course in courses:
+        for room in rooms_by_course[course]:
+            course_room_to_var[(course, room)] = var_count
+            var_to_course_room[var_count] = (course, room)
+            var_count += 1
+    for course in courses:
+        for time in times_by_course[course]:
+            course_time_to_var[(course, time)] = var_count
+            var_to_course_time[var_count] = (course, time)
+            var_count += 1
+
+def at_least_one_room_and_time_per_course():
+    for course in courses:
+        lst = []
+        for room in rooms_by_course[course]:
+            lst.append(course_room_to_var[(course, room)])
+        clauses.append(lst)
+    for course in courses:
+        lst = []
+        for time in times_by_course[course]:
+            lst.append(course_time_to_var[(course, time)])
+        clauses.append(lst)
+
+def at_most_one_room_and_time_per_course():
+    for course in courses:
+        for (i, room_a) in enumerate(rooms_by_course[course][:-1]):
+            for room_b in rooms_by_course[course][i+1:]:
+                lst = [
+                    -course_room_to_var[(course, room_a)],
+                    -course_room_to_var[(course, room_b)],
+                ]
+                clauses.append(lst)
+    for course in courses:
+        for (i, time_a) in enumerate(times_by_course[course][:-1]):
+            for time_b in times_by_course[course][i+1:]:
+                lst = [
+                    -course_time_to_var[(course, time_a)],
+                    -course_time_to_var[(course, time_b)],
+                ]
+                clauses.append(lst)
+
+def at_most_one_course_per_room_and_time():
+    for room in all_rooms:
+        for time in all_times:
+            for (i, course_a) in enumerate(courses[:-1]):
+                if room not in rooms_by_course[course_a]:
+                    continue
+                if time not in times_by_course[course_a]:
+                    continue
+                for course_b in courses[i+1:]:
+                    if room not in rooms_by_course[course_b]:
+                        continue
+                    if time not in times_by_course[course_b]:
+                        continue
+                    lst = [
+                        -course_room_to_var[(course_a, room)],
+                        -course_time_to_var[(course_a, time)],
+                        -course_room_to_var[(course_b, room)],
+                        -course_time_to_var[(course_b, time)],
+                    ]
+                    clauses.append(lst)
+
+def at_most_one_course_per_time_hard_conflicts():
+    for time in all_times:
+        done = {}
+        for course_a in courses:
+            if time not in times_by_course[course_a]:
+                continue
+            for course_b in course_data[course_a]['hard']:
+                if time not in times_by_course[course_b]:
+                    continue
+                key = tuple(sorted([course_a, course_b]))
+                if key in done:
+                    continue
+                lst = [
+                    -course_time_to_var[(course_a, time)],
+                    -course_time_to_var[(course_b, time)],
+                ]
+                clauses.append(lst)
+                done[key] = True
+
+def at_most_one_course_per_time_soft_conflicts(badness):
+    for time in all_times:
+        done = {}
+        for course_a in courses:
+            if time not in times_by_course[course_a]:
+                continue
+            for (course_b, penalty) in course_data[course_a]['soft']:
+                if penalty < badness:
+                    continue
+                if time not in times_by_course[course_b]:
+                    continue
+                key = tuple(sorted([course_a, course_b]))
+                if key in done:
+                    continue
+                lst = [
+                    -course_time_to_var[(course_a, time)],
+                    -course_time_to_var[(course_b, time)],
+                ]
+                clauses.append(lst)
+                done[key] = True
+
+def decode_solution(solution):
+    placement = {}
+    for course in courses:
+        for room in rooms_by_course[course]:
+            if course_room_to_var[(course, room)] in solution:
+                break
+        for time in times_by_course[course]:
+            if course_time_to_var[(course, time)] in solution:
+                break
+        placement[course] = (room, time)
+    return placement
+
+def print_schedule(placement):
+    grid = []
+    for i in range(len(all_times) + 1):
+        grid.append([''] * (len(all_rooms) + 1))
+    for (i, room) in enumerate(all_rooms):
+        grid[0][i+1] = room
+    for (i, time) in enumerate(all_times):
+        grid[i+1][0] = time
+    for (course, (room, time)) in placement.items():
+        grid[all_times.index(time)+1][all_rooms.index(room)+1] = course
+
+    width = 1
+    for time in all_times:
+        width = max(len(time), width)
+    for room in all_rooms:
+        width = max(len(room), width)
+    for course in courses:
+        width = max(len(course), width)
+    width += 2
+
+    for (i, row) in enumerate(grid):
+        div, elt = '+', '|'
+        for column in row:
+            div += '-'*width + '+'
+            elt += f'{column:^{width}}|'
+        if i == 0: print(div)
+        print(elt)
+        print(div)
+
+def main():
+    assign_vars()
+    n = len(clauses)
+    print('assigned', var_count, 'vars')
+    at_least_one_room_and_time_per_course()
+    print('at_least_one_room_and_time_per_course added', len(clauses) - n)
+    n = len(clauses)
+    at_most_one_room_and_time_per_course()
+    print('at_most_one_room_and_time_per_course added', len(clauses) - n)
+    n = len(clauses)
+    at_most_one_course_per_room_and_time()
+    print('at_most_one_course_per_room_and_time added', len(clauses) - n)
+    n = len(clauses)
+    at_most_one_course_per_time_hard_conflicts()
+    print('at_most_one_course_per_time_hard_conflicts added', len(clauses) - n)
+    n = len(clauses)
+    #at_most_one_course_per_time_soft_conflicts(32)
+    #print('at_most_one_course_per_time_soft_conflicts(32) added', len(clauses) - n)
+    #n = len(clauses)
+    print('total of', n, 'clauses')
+
+    cnf = CNF(from_clauses=clauses)
+    solver = Solver(bootstrap_with=cnf)
+    if not solver.solve():
+        print('Unsatisfiable')
+        sys.exit(1)
+    print()
+    placement = decode_solution(solver.get_model())
+    print_schedule(placement)
+
+main()
