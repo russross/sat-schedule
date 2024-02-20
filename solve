@@ -234,9 +234,9 @@ def main():
     at_most_one_course_per_time_hard_conflicts()
     print('at_most_one_course_per_time_hard_conflicts added', len(clauses) - n)
     n = len(clauses)
-    #at_most_one_course_per_time_soft_conflicts(32)
-    #print('at_most_one_course_per_time_soft_conflicts(32) added', len(clauses) - n)
-    #n = len(clauses)
+    at_most_one_course_per_time_soft_conflicts(32)
+    print('at_most_one_course_per_time_soft_conflicts(32) added', len(clauses) - n)
+    n = len(clauses)
     print('total of', n, 'clauses')
 
     cnf = CNF(from_clauses=clauses)
