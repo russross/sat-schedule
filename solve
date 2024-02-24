@@ -5,16 +5,13 @@ import pysat.solvers
 import sys
 from cset import course_data
 
-days = 'MTWRFSU'
 def time_key(t):
-    day = days.index(t[0])
-    for (i, ch) in enumerate(t):
-        if ch.isdigit():
-            time = t[i:i+4]
-            dur = int(t[i+5:])
-            break
-    return (dur*i, day, time, dur)
-
+    plus = t.index('+')
+    days = t[:plus-4]
+    time = t[plus-4:plus]
+    dur = int(t[plus+1:])
+    day_key = ''.join([ str('MTWRFSU'.index(ch)) for ch in days ])
+    return (dur*len(days), day_key, time, dur)
 
 all_rooms = {
     triple[0]
@@ -37,7 +34,12 @@ times_by_course = {
         for (course, value) in course_data.items()
 }
 times_in_order = sorted(all_times, key=time_key)
-time_pairs = { (x, y) for x in all_times for y in all_times if x < y }
+time_pairs = { (x, y)
+    for x in all_times
+    for y in all_times
+
+    if x < y
+}
 
 all_courses = set(course_data.keys())
 course_pairs = { (x, y)
@@ -63,8 +65,8 @@ for (time_a, time_b) in time_pairs:
     days_b, start_b, end_b = parse_time(time_b)
     if end_a <= start_b or end_b <= start_a: continue
     if len(set(days_a) & set(days_b)) > 0:
-        time_conflicts[time_a] = { time_b }
-        time_conflicts[time_b] = { time_a }
+        time_conflicts[time_a].add(time_b)
+        time_conflicts[time_b].add(time_a)
 
 course_room_to_var = {}
 var_to_course_room = {}
@@ -126,7 +128,7 @@ def at_most_one_course_per_room_and_time():
                 for x in times_by_course[course_a]
                 for y in times_by_course[course_b]
 
-                if x == y or (x < y and x in time_conflicts[y])
+                if x == y or x in time_conflicts[y] or y in time_conflicts[x]
             }
             for (time_a, time_b) in conflicting_times:
                 lst = [
@@ -142,14 +144,14 @@ def at_most_one_course_per_time_hard_conflicts():
         for x in all_courses
         for y in all_courses
 
-        if x != y and x in course_data[y]['hard']
+        if x < y and (x in course_data[y]['hard'] or y in course_data[x]['hard'])
     }
     for (course_a, course_b) in conflicting_courses:
         conflicting_times = { (x, y)
             for x in times_by_course[course_a]
             for y in times_by_course[course_b]
 
-            if x == y or x in time_conflicts[y]
+            if x == y or x in time_conflicts[y] or y in time_conflicts[x]
         }
         for (time_a, time_b) in conflicting_times:
             lst = [
@@ -163,8 +165,9 @@ def at_most_one_course_per_time_soft_conflicts(badness):
         for x in all_courses
         for y in all_courses
 
-        if x != y and any(
-            filter(lambda pair: pair[0] == y and pair[1] >= badness, course_data[x]['soft'])
+        if x < y and (
+            any(filter(lambda pair: pair[0] == y and pair[1] >= badness, course_data[x]['soft'])) or
+            any(filter(lambda pair: pair[0] == x and pair[1] >= badness, course_data[y]['soft']))
         )
     }
     for (course_a, course_b) in conflicting_courses:
@@ -172,7 +175,7 @@ def at_most_one_course_per_time_soft_conflicts(badness):
             for x in times_by_course[course_a]
             for y in times_by_course[course_b]
 
-            if x == y or x in time_conflicts[y]
+            if x == y or x in time_conflicts[y] or y in time_conflicts[x]
         }
         for (time_a, time_b) in conflicting_times:
             lst = [
@@ -222,6 +225,10 @@ def print_schedule(placement):
         print(elt)
         print(div)
 
+def print_static_placement(placement):
+    for (course, (room, time)) in sorted(placement.items()):
+        print(f'    place(solver, "{course}", "{room}", "{time}")?;')
+
 def main():
     assign_vars()
     n = len(clauses)
@@ -238,8 +245,8 @@ def main():
     at_most_one_course_per_time_hard_conflicts()
     print('at_most_one_course_per_time_hard_conflicts added', len(clauses) - n)
     n = len(clauses)
-    at_most_one_course_per_time_soft_conflicts(32)
-    print('at_most_one_course_per_time_soft_conflicts(32) added', len(clauses) - n)
+    at_most_one_course_per_time_soft_conflicts(99)
+    print('at_most_one_course_per_time_soft_conflicts(99) added', len(clauses) - n)
     n = len(clauses)
     print('total of', n, 'clauses')
 
@@ -250,6 +257,7 @@ def main():
         sys.exit(1)
     print()
     placement = decode_solution(solver.get_model())
-    print_schedule(placement)
+    #print_schedule(placement)
+    print_static_placement(placement)
 
 main()
