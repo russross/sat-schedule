@@ -2,8 +2,9 @@
 
 import subprocess
 import sys
+import time
 import io
-from cset import course_data
+from computing import course_data
 
 def time_key(t):
     plus = t.index('+')
@@ -21,6 +22,14 @@ all_rooms = {
 rooms_by_course = {
     course: { room for (room, time, badness) in value['room_times'] }
         for (course, value) in course_data.items()
+}
+courses_by_room = {
+    room: { course
+        for course in rooms_by_course.keys()
+
+        if room in rooms_by_course[course]
+    }
+    for room in all_rooms
 }
 rooms_in_order = sorted(all_rooms)
 
@@ -58,6 +67,22 @@ def parse_time(t):
             return (days, start, end)
     print(f'failed to parse {t}')
     sys.exit(1)
+def time_days(t): return parse_time(t)[0]
+def time_start(t): return parse_time(t)[1]
+def time_end(t): return parse_time(t)[2]
+
+time_starts = { (day, time_start(time))
+    for time in all_times
+    for day in parse_time(time)[0]
+}
+conflicts_by_time_start = {
+    (day, start): { time
+        for time in all_times
+
+        if day in time_days(time) and time_start(time) <= start and time_end(time) > start
+    }
+    for (day, start) in time_starts
+}
 
 time_conflicts = { time: set() for time in all_times }
 for (time_a, time_b) in time_pairs:
@@ -68,10 +93,8 @@ for (time_a, time_b) in time_pairs:
         time_conflicts[time_a].add(time_b)
         time_conflicts[time_b].add(time_a)
 
-course_room_to_var = {}
-var_to_course_room = {}
-course_time_to_var = {}
-var_to_course_time = {}
+course_room_time_to_var = {}
+var_to_course_room_time = {}
 var_count = 0
 clauses = []
 constraints = []
@@ -85,126 +108,115 @@ def assign_vars():
     global var_count
     for course in all_courses:
         for room in rooms_by_course[course]:
-            var_count += 1
-            course_room_to_var[(course, room)] = var_count
-            var_to_course_room[var_count] = (course, room)
-    for course in all_courses:
-        for time in times_by_course[course]:
-            var_count += 1
-            course_time_to_var[(course, time)] = var_count
-            var_to_course_time[var_count] = (course, time)
+            for time in times_by_course[course]:
+                var_count += 1
+                course_room_time_to_var[(course, room, time)] = var_count
+                var_to_course_room_time[var_count] = (course, room, time)
 
 def exactly_one_room_and_time_per_course():
     for course in all_courses:
-        lst = [course_room_to_var[(course, room)] for room in rooms_by_course[course]]
-        clauses.append(lst)
-        clauses.append(lst)
-        set_constraint('<= 1')
-        lst = [course_time_to_var[(course, time)] for time in times_by_course[course]]
+        lst = [course_room_time_to_var[(course, room, time)]
+            for room in rooms_by_course[course]
+            for time in times_by_course[course]
+        ]
         clauses.append(lst)
         clauses.append(lst)
         set_constraint('<= 1')
 
 def at_most_one_course_per_room_and_time():
-    for (course_a, course_b) in course_pairs:
-        for room in rooms_by_course[course_a] & rooms_by_course[course_b]:
-            conflicting_times = { (x, y)
-                for x in times_by_course[course_a]
-                for y in times_by_course[course_b]
+    for room in all_rooms:
+        for (start, overlapping) in conflicts_by_time_start.items():
+            courses = { course
+                for course in courses_by_room[room]
 
-                if x == y or
-                    (x in time_conflicts[y] or y in time_conflicts[x]) and
-                    (x < y or x not in times_by_course[course_b] or y not in times_by_course[course_a])
+                if len(times_by_course[course] & overlapping) > 0
             }
-            for (time_a, time_b) in conflicting_times:
-                lst = [
-                    -course_room_to_var[(course_a, room)],
-                    -course_time_to_var[(course_a, time_a)],
-                    -course_room_to_var[(course_b, room)],
-                    -course_time_to_var[(course_b, time_b)],
-                ]
-                clauses.append(lst)
-
-def at_most_one_course_per_time_hard_conflicts():
-    conflicting_courses = { (x, y)
-        for x in all_courses
-        for y in all_courses
-
-        if x < y and (x in course_data[y]['hard'] or y in course_data[x]['hard'])
-    }
-    for (course_a, course_b) in conflicting_courses:
-        conflicting_times = { (x, y)
-            for x in times_by_course[course_a]
-            for y in times_by_course[course_b]
-
-            if x == y or x in time_conflicts[y] or y in time_conflicts[x]
-        }
-        for (time_a, time_b) in conflicting_times:
-            lst = [
-                -course_time_to_var[(course_a, time_a)],
-                -course_time_to_var[(course_b, time_b)],
+            if len(courses) < 2: continue
+            lst = [ course_room_time_to_var[(course, room, overlap)]
+                for course in courses
+                for overlap in (times_by_course[course] & overlapping)
             ]
             clauses.append(lst)
+            set_constraint('<= 1')
 
-def at_most_one_course_per_time_soft_conflicts(badness):
-    conflicting_courses = { (x, y)
-        for x in all_courses
-        for y in all_courses
-
-        if x < y and (
-            x in course_data[y]['soft'] and course_data[y]['soft'][x] == badness or
-            y in course_data[x]['soft'] and course_data[x]['soft'][y] == badness
-        )
-    }
-    for (course_a, course_b) in conflicting_courses:
-        conflicting_times = { (x, y)
-            for x in times_by_course[course_a]
-            for y in times_by_course[course_b]
-
-            if x == y or x in time_conflicts[y] or y in time_conflicts[x]
-        }
-        for (time_a, time_b) in conflicting_times:
-            lst = [
-                -course_time_to_var[(course_a, time_a)],
-                -course_time_to_var[(course_b, time_b)],
-            ]
-            clauses.append(lst)
-
-def at_most_one_course_per_time_soft_conflicts_up_to_k(badness, k):
+taboo = set()
+def at_most_one_course_per_time_conflicts(badness=None, k=None):
     global var_count
     k_vars = []
+
     conflicting_courses = { (x, y)
         for x in all_courses
         for y in all_courses
 
         if x < y and (
-            x in course_data[y]['soft'] and course_data[y]['soft'][x] == badness or
-            y in course_data[x]['soft'] and course_data[x]['soft'][y] == badness
+            badness is None and (x in course_data[y]['hard'] or y in course_data[x]['hard']) or
+            badness is not None and (
+                x in course_data[y]['soft'] and course_data[y]['soft'][x] == badness or
+                y in course_data[x]['soft'] and course_data[x]['soft'][y] == badness
+            )
         )
     }
     for (course_a, course_b) in conflicting_courses:
-        conflicting_times = { (x, y)
-            for x in times_by_course[course_a]
-            for y in times_by_course[course_b]
+        start_times = (
+            { (day, time_start(time))
+                for time in times_by_course[course_a]
+                for day in time_days(time)
+            } |
+            { (day, time_start(time))
+                for time in times_by_course[course_b]
+                for day in time_days(time)
+            }
+        )
+        for start in start_times:
+            overlapping_a = times_by_course[course_a] & conflicts_by_time_start[start]
+            overlapping_b = times_by_course[course_b] & conflicts_by_time_start[start]
+            lst_a = []
+            lst_b = []
+            for room_a in rooms_by_course[course_a]:
+                lst_a.extend([ course_room_time_to_var[(course_a, room_a, time_a)]
+                    for time_a in overlapping_a
+                ])
+            for room_b in rooms_by_course[course_b]:
+                lst_b.extend([ course_room_time_to_var[(course_b, room_b, time_b)]
+                    for time_b in overlapping_b
+                ])
+            if len(lst_a) == 0 or len(lst_b) == 0:
+                continue
 
-            if x == y or x in time_conflicts[y] or y in time_conflicts[x]
-        }
-        for (time_a, time_b) in conflicting_times:
-            var_count += 1
-            k_vars.append(var_count)
-
-            lst = [
-                -course_time_to_var[(course_a, time_a)],
-                -course_time_to_var[(course_b, time_b)],
-                var_count,
-            ]
-
-            clauses.append(lst)
-    if len(k_vars) > 1:
+            lst = []
+            lst.extend(lst_a)
+            lst.extend(lst_b)
+            if k is None:
+                lst.sort()
+                constraint = '<= 1'
+                key = (tuple(lst), constraint)
+                if key not in taboo:
+                    taboo.add(key)
+                    clauses.append(lst)
+                    set_constraint(constraint)
+            else:
+                lst = [elt for elt in lst]
+                lst.sort()
+                constraint = '<= 2'
+                key = (tuple(lst), constraint)
+                if key not in taboo:
+                    taboo.add(key)
+                    var_count += 1
+                    k_vars.append(var_count)
+                    lst.append(var_count)
+                    clauses.append(lst)
+                    set_constraint(constraint)
+    if k is not None and len(k_vars) > k:
+        k_vars.sort()
+        constraint = f'>= {len(k_vars)-k}'
         clauses.append(k_vars)
-        set_constraint(f'<= {k}')
+        set_constraint(constraint)
+
 
 def anticonflict(single, group_raw):
+    global var_count
+    k_vars = []
+
     assert single in course_data
     group = { other
         for other in all_courses
@@ -215,33 +227,27 @@ def anticonflict(single, group_raw):
     }
     assert len(group) != 0
 
-    single_times = { time_single
-        for (room_single, time_single, penalty_single) in course_data[single]['room_times']
-    }
-    for time_single in single_times:
+    for time in times_by_course[single]:
+        lst = []
+        for room_single in rooms_by_course[single]:
+            lst.append(course_room_time_to_var[(single, room_single, time)])
+
         for other in group:
-            other_times = { time_other
-                for (room_other, time_other, penalty_other) in course_data[other]['room_times']
+            for time_other in times_by_course[other]:
+                if time_other == time: continue
+                for room_other in rooms_by_course[other]:
+                    lst.append(course_room_time_to_var[(other, room_other, time_other)])
 
-                if time_other != time_single
-            }
-            for time_other in other_times:
-                lst = [
-                    -course_time_to_var[(single, time_single)],
-                    -course_time_to_var[(other, time_other)],
-                ]
-                clauses.append(lst)
+        constraint = f'<= {len(group)}'
+        clauses.append(lst)
+        set_constraint(constraint)
 
-def decode_solution(solution):
+def decode_solution(solution_list):
+    solution = set(solution_list)
     placement = {}
-    for course in all_courses:
-        for room in rooms_by_course[course]:
-            if course_room_to_var[(course, room)] in solution:
-                break
-        for time in times_by_course[course]:
-            if course_time_to_var[(course, time)] in solution:
-                break
-        placement[course] = (room, time)
+    for ((course, room, time), var) in course_room_time_to_var.items():
+        if var in solution:
+            placement[course] = (room, time)
     return placement
 
 def print_schedule(placement):
@@ -327,8 +333,12 @@ def main():
     at_most_one_course_per_room_and_time()
     print('at_most_one_course_per_room_and_time added', len(clauses) - n)
     n = len(clauses)
-    at_most_one_course_per_time_hard_conflicts()
-    print('at_most_one_course_per_time_hard_conflicts added', len(clauses) - n)
+    at_most_one_course_per_time_conflicts()
+    print('hard_conflicts added', len(clauses) - n)
+    n = len(clauses)
+    anticonflict('CS 4600-01', ['SE 4600-01'])
+    anticonflict('CS 1030-01', ['CS 1400'])
+    print('anticonflict added', len(clauses) - n)
     n = len(clauses)
 
     print('score levels:')
@@ -341,32 +351,37 @@ def main():
         print(f'    {badness:2}: {k}')
 
     soft_limits = [
-        (99, 4),
+        #(99, 4),
+        #(60, 0),
+        #(45, 4),
+        #(32, 50),
+
+        (99, 0),
         (60, 0),
-        (45, 3),
-        (32, 30),
+        (45, 0),
+        (32, 0),
+        (30, 1),
     ]
 
     for (badness, k) in soft_limits:
         if k == 0:
-            at_most_one_course_per_time_soft_conflicts(badness)
-            print(f'at_most_one_course_per_time_soft_conflicts({badness}) added', len(clauses) - n)
+            at_most_one_course_per_time_conflicts(badness)
+            print(f'soft_conflicts at badness {badness} added', len(clauses) - n)
         else:
-            at_most_one_course_per_time_soft_conflicts_up_to_k(badness, k)
-            print(f'at_most_one_course_per_time_soft_conflicts_up_to_k({badness}, {k}) added', len(clauses) - n)
+            at_most_one_course_per_time_conflicts(badness, k)
+            print(f'soft_conflicts at badness {badness} allowing up to {k} added', len(clauses) - n)
         n = len(clauses)
 
-    #anticonflict('CS 4600-01', ['SE 4600-01'])
-    #anticonflict('CS 1030-01', ['CS 1400'])
-    #print('anticonflict added', len(clauses) - n)
-    #n = len(clauses)
     print('total of', n, 'clauses')
 
+    start = time.time()
     solution = run_solver_and_gather_result(var_count, clauses, constraints)
+    print(f'solver took {time.time()-start:.2f}s')
     if solution is None:
         sys.exit(1)
+    print('satisfied')
     placement = decode_solution(solution)
-    #print_schedule(placement)
-    print_static_placement(placement)
+    print_schedule(placement)
+    #print_static_placement(placement)
 
 main()
